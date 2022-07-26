@@ -11,19 +11,6 @@
 // The default "Salt" is a fixed 256 byte array of pseudo-random values, taken
 // from /dev/urandom.
 //
-// Encryption key is derived in the following manner:
-//
-//   1. Repeat bytes of the passphrase to form 32 bytes of the Key
-//   2. Take the first byte of the passphrase and use it for the value of the
-//      Offset in the salt array.
-//   3. For each byte of the key, `i` being the counter, and `pass` being the
-//      passphrase:
-//
-//         key[i] = pass[i%len(pass)] ^ salt[(i+startOffset)%SaltSz]
-//
-// Then the plain text is encrypted with the Key using AES-256 in GCM and
-// signed together with additional data.
-//
 // Then additional data, nonce and ciphertext are packed into the following
 // sequence of bytes:
 //
@@ -43,11 +30,14 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha512"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"strings"
+
+	"golang.org/x/crypto/pbkdf2"
 )
 
 const (
@@ -63,6 +53,9 @@ const (
 var (
 	// used to identify encrypted strings
 	signature = "SEC."
+	// DeriveIter is the number of iterations used to derive the key.
+	DeriveIter = 4096
+
 	// salt will be used to XOR the gKey which we generate by padding the
 	// passphrase.  It is advised that caller sets their own salt (BYO) with
 	// SetSalt.
@@ -162,21 +155,8 @@ func deriveKey(pass []byte) ([]byte, error) {
 	if len(pass) == 0 {
 		return nil, errors.New("empty passphrase")
 	}
-	if len(pass) > keySz {
-		return nil, errors.New("passphrase is too big")
-	}
 
-	var key = make([]byte, keySz)
-	var startOffset = int(pass[0]) // starting offset in salt is the first byte of the password
-	if SaltSz <= startOffset {
-		// this should never happen
-		panic("start offset overflows the salt array size")
-	}
-
-	for i := range key {
-		key[i] = pass[i%len(pass)] ^ salt[(i+startOffset)%SaltSz]
-	}
-	return key, nil
+	return pbkdf2.Key(pass, salt[:], DeriveIter, keySz, sha512.New), nil
 }
 
 // Encrypt encrypts the plain text password to use in the configuration file
