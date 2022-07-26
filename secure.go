@@ -46,8 +46,6 @@ const (
 	keySz     = keyBits / 8      // bytes, gKey size
 	adlSz     = 1                // bytes, size of additional data length field
 	maxDataSz = 1<<(adlSz*8) - 1 // bytes, max additional data size (this is the maximum that can fit into (adlSz) bytes)
-	// SaltSz is the size of the Salt array.
-	SaltSz = keySz * 8
 )
 
 var (
@@ -59,7 +57,7 @@ var (
 	// salt will be used to XOR the gKey which we generate by padding the
 	// passphrase.  It is advised that caller sets their own salt (BYO) with
 	// SetSalt.
-	salt = [SaltSz]byte{
+	salt = []byte{
 		0x51, 0xfc, 0xd8, 0xf9, 0xab, 0x85, 0x93, 0x5d, 0xd2, 0x85, 0x2e, 0x78,
 		0x3f, 0x80, 0x3a, 0xce, 0x19, 0xf1, 0x20, 0x75, 0x2a, 0xdd, 0x7b, 0x5c,
 		0xe6, 0x17, 0xdb, 0x4b, 0x72, 0xc7, 0x83, 0x06, 0x10, 0x91, 0x70, 0x33,
@@ -352,10 +350,10 @@ func SetSignature(s string) {
 // Salt should be a random set of bytes, but should remain the same across the
 // calls and application restarts, so it should be generated in some
 // deterministic way.  It would not be possible to decrypt cipher text with
-// different salt.
+// different salt.  It is recommended to use at least 8 bytes of salt.
 //
 // IT IS STRONGLY ADVISED TO USE YOUR OWN SALT.
 //
-func SetSalt(sa [SaltSz]byte) {
+func SetSalt(sa []byte) {
 	salt = sa
 }

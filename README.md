@@ -9,4 +9,4 @@ Do not use the provided "salt" for anything other than testing - it may change
 from version to version to encourage to use your own salt.
 
 It is strongly encouraged to set your own salt with SetSalt() before using the
-package.
+encryption functions of the package.
