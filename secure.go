@@ -82,6 +82,8 @@ var (
 	}
 )
 
+var b64encoding = base64.URLEncoding
+
 var gKey []byte
 
 // SetGlobalKey sets the global package Key, it doesn't check for key size.
@@ -90,12 +92,20 @@ func SetGlobalKey(k []byte) error {
 	return nil
 }
 
+// SetPassphrase allows to set the global passphrase, from which the key is
+// derived.
 func SetPassphrase(b []byte) error {
 	k, err := DeriveKey(b, keySz)
 	if err != nil {
 		return err
 	}
 	return SetGlobalKey(k)
+}
+
+// SetEncoding allows to set the package-wide encoding.  Encoding is used
+// for armoring the ciphertext.
+func SetEncoding(enc *base64.Encoding) {
+	b64encoding = enc
 }
 
 // DeriveKey interpolates the passphrase value to the gKey size and xors it
@@ -211,7 +221,7 @@ func pack(cm ciphermsg) ([]byte, error) {
 }
 
 func armor(packed []byte) string {
-	return signature + base64.StdEncoding.EncodeToString(packed)
+	return signature + b64encoding.EncodeToString(packed)
 }
 
 func unarmor(s string) ([]byte, error) {
@@ -220,7 +230,7 @@ func unarmor(s string) ([]byte, error) {
 	if len(s) < sigSz || s[0:sigSz] != signature {
 		return nil, ErrNotEncrypted
 	}
-	packed, err := base64.StdEncoding.DecodeString(s[sigSz:])
+	packed, err := b64encoding.DecodeString(s[sigSz:])
 	if err != nil {
 		return nil, err
 	}

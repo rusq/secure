@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	encryptedPlainText = "SEC.APBBoqZpC1YGYAkJWlKWk6v47yAKTCJGN3aqkzkGB+QGY1pfJ9Ps"
+	encryptedPlainText = "SEC.AIIPjL0a2HgLgOySAw9fAT6ovih9MfzkMv_pyWmmkA3eBxYbDlLQ"
 )
 
 var testPassphrase = []byte{0, 0, 0, 0, 0, 0}
