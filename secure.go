@@ -26,7 +26,6 @@
 package secure
 
 import (
-	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -41,11 +40,11 @@ import (
 )
 
 const (
-	nonceSz   = 12               // bytes, nonce sz
-	keyBits   = 256              // encryption gKey size.
-	keySz     = keyBits / 8      // bytes, gKey size
-	adlSz     = 1                // bytes, size of additional data length field
-	maxDataSz = 1<<(adlSz*8) - 1 // bytes, max additional data size (this is the maximum that can fit into (adlSz) bytes)
+	nonceSz   = 12                // bytes, nonce sz
+	keyBits   = 256               // encryption gKey size.
+	keySz     = keyBits >> 3      // bytes, gKey size
+	adlSz     = 1                 // bytes, size of additional data length field
+	maxDataSz = 1<<(adlSz<<3) - 1 // bytes, max additional data size (this is the maximum that can fit into (adlSz) bytes)
 )
 
 var (
@@ -83,75 +82,30 @@ var (
 	}
 )
 
-var (
-	ErrNotEncrypted    = errors.New("string not encrypted")
-	ErrNoEncryptionKey = errors.New("no encryption gKey")
-	ErrDataOverflow    = errors.New("additional data overflow")
-	ErrInvalidKeySz    = errors.New("invalid Key size")
-)
-
-// CipherError indicates that there was an error during decrypting of
-// ciphertext.
-type CipherError struct {
-	Err error
-}
-
-func (e *CipherError) Error() string {
-	return e.Err.Error()
-}
-
-func (e *CipherError) Unwrap() error {
-	return e.Err
-}
-
-func (e *CipherError) Is(target error) bool {
-	t, ok := target.(*CipherError)
-	if !ok {
-		return false
-	}
-	return e.Err.Error() == t.Err.Error()
-}
-
-type CorruptError struct {
-	Value []byte
-}
-
-func (e *CorruptError) Error() string {
-	return "corrupt packed data"
-}
-
-func (e *CorruptError) Is(target error) bool {
-	t, ok := target.(*CorruptError)
-	if !ok {
-		return false
-	}
-	return bytes.Equal(t.Value, e.Value)
-}
-
 var gKey []byte
 
-// setGlobalKey sets the encryption gKey globally.
-func setGlobalKey(k []byte) error {
-	if len(k) != keySz {
-		return ErrInvalidKeySz
-	}
+// SetGlobalKey sets the global package Key, it doesn't check for key size.
+func SetGlobalKey(k []byte) error {
 	gKey = k
 	return nil
 }
 
 func SetPassphrase(b []byte) error {
-	k, err := deriveKey(b)
+	k, err := DeriveKey(b, keySz)
 	if err != nil {
 		return err
 	}
-	return setGlobalKey(k)
+	return SetGlobalKey(k)
 }
 
-// deriveKey interpolates the passphrase value to the gKey size and xors it
+// DeriveKey interpolates the passphrase value to the gKey size and xors it
 // with salt.
-func deriveKey(pass []byte) ([]byte, error) {
+func DeriveKey(pass []byte, keySz int) ([]byte, error) {
 	if len(pass) == 0 {
 		return nil, errors.New("empty passphrase")
+	}
+	if keySz%8 != 0 {
+		return nil, ErrInvalidKeySz
 	}
 
 	return pbkdf2.Key(pass, salt[:], DeriveIter, keySz, sha512.New), nil
@@ -170,19 +124,19 @@ func Decrypt(s string) (string, error) {
 	return decrypt(s, gKey)
 }
 
-// EncryptWithPassphrase encrypts plaintext with the provided passphrase
+// EncryptWithPassphrase encrypts plaintext with the provided passphrase.
 func EncryptWithPassphrase(plaintext string, passphrase []byte) (string, error) {
-	key, err := deriveKey(passphrase)
+	key, err := DeriveKey(passphrase, keySz)
 	if err != nil {
 		return "", err
 	}
 	return encrypt(plaintext, key, nil)
 }
 
-// DecryptWithPassphrase attempts to descrypt string with the provided MAC
-// address.
+// DecryptWithPassphrase attempts to descrypt string with the provided
+// passphrase.
 func DecryptWithPassphrase(s string, passphrase []byte) (string, error) {
-	key, err := deriveKey(passphrase)
+	key, err := DeriveKey(passphrase, keySz)
 	if err != nil {
 		return "", err
 	}
@@ -325,16 +279,6 @@ func decrypt(s string, key []byte) (string, error) {
 		return "", &CipherError{err}
 	}
 	return string(plaintext), nil
-}
-
-// IsDecipherError returns true if there was a decryption error or corrupt data
-// error and false if it's a different kind of error.
-func IsDecipherError(err error) bool {
-	switch err.(type) {
-	case *CipherError, *CorruptError:
-		return true
-	}
-	return false
 }
 
 // SetSignature allows to set package-wide signature, that is used to identify

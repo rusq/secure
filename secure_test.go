@@ -56,7 +56,7 @@ func Test_deriveKey(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := deriveKey(tt.args.pass)
+			got, err := DeriveKey(tt.args.pass, keySz)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("deriveKey() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -77,7 +77,7 @@ type keySentinel struct {
 // the sentinel to reset the initial variable value.
 func newKeySentinel(k []byte) keySentinel {
 	m := keySentinel{gKey}
-	if err := setGlobalKey(k); err != nil {
+	if err := SetGlobalKey(k); err != nil {
 		panic(err)
 	}
 	return m
@@ -85,14 +85,14 @@ func newKeySentinel(k []byte) keySentinel {
 
 // Reset resets the old value of KeyFromHwAddr
 func (m keySentinel) Reset() {
-	if err := setGlobalKey(m.oldKey); err != nil {
+	if err := SetGlobalKey(m.oldKey); err != nil {
 		log.Printf("this is ok: %s", err)
 	}
 }
 
 // newTestKeySentinel sets the gKey to test password
 func newTestKeySentinel() keySentinel {
-	k, err := deriveKey(testPassphrase)
+	k, err := DeriveKey(testPassphrase, keySz)
 	if err != nil {
 		panic(err)
 	}
@@ -105,7 +105,7 @@ func Test_Encryption(t *testing.T) {
 	m := newTestKeySentinel()
 	defer m.Reset()
 
-	key, err := deriveKey(testPassphrase)
+	key, err := DeriveKey(testPassphrase, keySz)
 	if err != nil {
 		t.Fatal(err)
 	}
