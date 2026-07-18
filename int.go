@@ -2,44 +2,78 @@ package secure
 
 import (
 	"bytes"
-	"fmt"
+	"encoding/json"
 	"strconv"
 )
 
-// Int is an encrypted integer.
-type Int int
-
-func (ei Int) String() string {
-	return strconv.Itoa(int(ei))
+// EncryptedInt is an instance-bound encrypted JSON integer encoded as a string.
+type EncryptedInt struct {
+	codec          Codec
+	value          int
+	allowPlaintext bool
 }
 
-func (ei Int) MarshalJSON() ([]byte, error) {
-	data, err := Encrypt(ei.String())
-	return []byte(`"` + data + `"`), err
+// NewEncryptedInt creates a configured encrypted JSON integer.
+func NewEncryptedInt(codec Codec, value int, opts ...JSONOption) (EncryptedInt, error) {
+	if codec == nil {
+		return EncryptedInt{}, ErrUnconfigured
+	}
+	cfg, err := applyJSONOptions(opts)
+	if err != nil {
+		return EncryptedInt{}, err
+	}
+	return EncryptedInt{codec: codec, value: value, allowPlaintext: cfg.allowPlaintext}, nil
 }
 
-func (ei *Int) UnmarshalJSON(b []byte) error {
-	b = bytes.Trim(b, `"`)
-	if len(b) == 0 {
-		*ei = 0
+// Value returns the decrypted integer.
+func (i EncryptedInt) Value() int { return i.value }
+
+// Set replaces the plaintext integer.
+func (i *EncryptedInt) Set(value int) { i.value = value }
+
+func (i EncryptedInt) String() string { return strconv.Itoa(i.value) }
+
+func (i EncryptedInt) MarshalJSON() ([]byte, error) {
+	if i.codec == nil {
+		return nil, ErrUnconfigured
+	}
+	envelope, err := i.codec.Seal([]byte(strconv.Itoa(i.value)), nil)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(envelope)
+}
+
+func (i *EncryptedInt) UnmarshalJSON(data []byte) error {
+	if i == nil || i.codec == nil {
+		return ErrUnconfigured
+	}
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return ErrInvalidEnvelope
+	}
+	var encoded string
+	if err := json.Unmarshal(data, &encoded); err != nil {
+		return err
+	}
+	if len(encoded) < len(prefix) || encoded[:len(prefix)] != prefix {
+		if !i.allowPlaintext {
+			return ErrInvalidEnvelope
+		}
+		value, err := strconv.Atoi(encoded)
+		if err != nil {
+			return err
+		}
+		i.value = value
 		return nil
 	}
-	pt, err := Decrypt(string(b))
-	if err != nil {
-		if err == ErrNotEncrypted {
-			val, err := strconv.Atoi(string(b))
-			if err != nil {
-				return err
-			}
-			*ei = Int(val)
-			return nil
-		}
-		return fmt.Errorf("%w, while decrypting: %q", err, string(b))
-	}
-	val, err := strconv.Atoi(pt)
+	plaintext, err := i.codec.Open(encoded, nil)
 	if err != nil {
 		return err
 	}
-	*ei = Int(val)
+	value, err := strconv.Atoi(string(plaintext))
+	if err != nil {
+		return ErrInvalidEnvelope
+	}
+	i.value = value
 	return nil
 }

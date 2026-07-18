@@ -2,24 +2,42 @@ name: Go
 
 on:
   push:
-    branches: [ "master" ]
+    branches: [master]
   pull_request:
-    branches: [ "master" ]
+    branches: [master]
+
+permissions:
+  contents: read
 
 jobs:
-
-  build:
+  test:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Format
+        run: test -z "$(gofmt -d .)"
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test ./... -race -count=2 -coverprofile=coverage.out
+      - name: Enforce coverage
+        run: |
+          total=$(go tool cover -func=coverage.out | awk '/^total:/ {gsub("%", "", $3); print $3}')
+          awk -v total="$total" 'BEGIN { if (total < 85) exit 1 }'
+      - name: Build
+        run: go build ./...
+      - name: Vulnerability scan
+        uses: golang/govulncheck-action@032d45514ae346b1db93c04b0c90b841c370344f # v1
 
-    - name: Set up Go
-      uses: actions/setup-go@v6
-      with:
-        go-version: 1.25
-
-    - name: Build
-      run: go build -v ./...
-
-    - name: Test
-      run: go test -v ./...
+  fuzz-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+      - run: go test ./... -run=^$ -fuzz=FuzzOpen -fuzztime=20s
