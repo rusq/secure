@@ -3,6 +3,7 @@ package secure
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"testing"
 )
@@ -10,7 +11,7 @@ import (
 func TestAuthenticatedStreamRoundTrip(t *testing.T) {
 	c, _ := NewCipher(testKey)
 	for _, size := range []int{0, 1, streamChunkSize - 1, streamChunkSize, streamChunkSize + 1, 2*streamChunkSize + 17} {
-		t.Run(string(rune(size)), func(t *testing.T) {
+		t.Run(fmt.Sprintf("size=%d", size), func(t *testing.T) {
 			input := bytes.Repeat([]byte{byte(size)}, size)
 			var encrypted bytes.Buffer
 			w, err := c.NewEncryptWriter(&encrypted)
@@ -33,6 +34,63 @@ func TestAuthenticatedStreamRoundTrip(t *testing.T) {
 			}
 			if !bytes.Equal(got, input) {
 				t.Fatalf("got %d bytes, want %d", len(got), len(input))
+			}
+		})
+	}
+}
+
+func TestUnconfiguredCiphers(t *testing.T) {
+	var nilCipher *Cipher
+	var nilPasswordCipher *PasswordCipher
+
+	tests := []struct {
+		name string
+		call func() error
+	}{
+		{"nil Cipher Seal", func() error { _, err := nilCipher.Seal(nil, nil); return err }},
+		{"nil Cipher Open", func() error { _, err := nilCipher.Open("", nil); return err }},
+		{"nil Cipher NewEncryptWriter", func() error { _, err := nilCipher.NewEncryptWriter(io.Discard); return err }},
+		{"nil Cipher NewDecryptReader", func() error { _, err := nilCipher.NewDecryptReader(bytes.NewReader(nil)); return err }},
+		{"zero Cipher Seal", func() error { _, err := new(Cipher).Seal(nil, nil); return err }},
+		{"zero Cipher Open", func() error { _, err := new(Cipher).Open("", nil); return err }},
+		{"zero Cipher NewEncryptWriter", func() error { _, err := new(Cipher).NewEncryptWriter(io.Discard); return err }},
+		{"zero Cipher NewDecryptReader", func() error { _, err := new(Cipher).NewDecryptReader(bytes.NewReader(nil)); return err }},
+		{"nil PasswordCipher Seal", func() error { _, err := nilPasswordCipher.Seal(nil, nil); return err }},
+		{"nil PasswordCipher Open", func() error { _, err := nilPasswordCipher.Open("", nil); return err }},
+		{"nil PasswordCipher NewEncryptWriter", func() error { _, err := nilPasswordCipher.NewEncryptWriter(io.Discard); return err }},
+		{"nil PasswordCipher NewDecryptReader", func() error { _, err := nilPasswordCipher.NewDecryptReader(bytes.NewReader(nil)); return err }},
+		{"zero PasswordCipher Seal", func() error { _, err := new(PasswordCipher).Seal(nil, nil); return err }},
+		{"zero PasswordCipher Open", func() error { _, err := new(PasswordCipher).Open("", nil); return err }},
+		{"zero PasswordCipher NewEncryptWriter", func() error { _, err := new(PasswordCipher).NewEncryptWriter(io.Discard); return err }},
+		{"zero PasswordCipher NewDecryptReader", func() error { _, err := new(PasswordCipher).NewDecryptReader(bytes.NewReader(nil)); return err }},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.call(); !errors.Is(err, ErrUnconfigured) {
+				t.Fatalf("error = %v, want %v", err, ErrUnconfigured)
+			}
+		})
+	}
+}
+
+func TestConfiguredCiphersRejectNilStreams(t *testing.T) {
+	c, _ := NewCipher(testKey)
+	p, _ := NewPasswordCipher([]byte("password"))
+
+	for _, tc := range []struct {
+		name string
+		call func() error
+		want string
+	}{
+		{"Cipher writer", func() error { _, err := c.NewEncryptWriter(nil); return err }, "secure: nil writer"},
+		{"Cipher reader", func() error { _, err := c.NewDecryptReader(nil); return err }, "secure: nil reader"},
+		{"PasswordCipher writer", func() error { _, err := p.NewEncryptWriter(nil); return err }, "secure: nil writer"},
+		{"PasswordCipher reader", func() error { _, err := p.NewDecryptReader(nil); return err }, "secure: nil reader"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.call(); err == nil || err.Error() != tc.want {
+				t.Fatalf("error = %v, want %q", err, tc.want)
 			}
 		})
 	}

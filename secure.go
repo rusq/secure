@@ -76,6 +76,13 @@ type Cipher struct {
 	cfg config
 }
 
+func (c *Cipher) validate() error {
+	if c == nil || c.cfg.maxEnvelope == 0 || c.cfg.rand == nil {
+		return ErrUnconfigured
+	}
+	return nil
+}
+
 // NewCipher creates a key-based encryption context. key must contain 32 bytes.
 func NewCipher(key []byte, opts ...Option) (*Cipher, error) {
 	if len(key) != keySize {
@@ -143,6 +150,13 @@ type PasswordCipher struct {
 	cfg        passwordConfig
 }
 
+func (p *PasswordCipher) validate() error {
+	if p == nil || len(p.passphrase) == 0 || p.cfg.maxEnvelope == 0 || p.cfg.rand == nil {
+		return ErrUnconfigured
+	}
+	return nil
+}
+
 // NewPasswordCipher creates a password-based encryption context.
 func NewPasswordCipher(passphrase []byte, opts ...PasswordOption) (*PasswordCipher, error) {
 	if len(passphrase) == 0 {
@@ -162,11 +176,17 @@ func NewPasswordCipher(passphrase []byte, opts ...PasswordOption) (*PasswordCiph
 
 // Seal encrypts plaintext and authenticates additionalData without storing it.
 func (c *Cipher) Seal(plaintext, additionalData []byte) (string, error) {
+	if err := c.validate(); err != nil {
+		return "", err
+	}
 	return sealWithKey(c.key[:], modeKey, nil, plaintext, additionalData, c.cfg)
 }
 
 // Open authenticates and decrypts a key-based SEC2 envelope.
 func (c *Cipher) Open(envelope string, additionalData []byte) ([]byte, error) {
+	if err := c.validate(); err != nil {
+		return nil, err
+	}
 	if len(additionalData) > c.cfg.maxEnvelope {
 		return nil, ErrLimitExceeded
 	}
@@ -193,6 +213,9 @@ func (c *Cipher) DecryptString(envelope string) (string, error) {
 
 // Seal encrypts plaintext using a fresh salt and Argon2id-derived key.
 func (p *PasswordCipher) Seal(plaintext, additionalData []byte) (string, error) {
+	if err := p.validate(); err != nil {
+		return "", err
+	}
 	if err := checkSealSize(2+4+4+1+saltSize, len(plaintext), len(additionalData), p.cfg.maxEnvelope); err != nil {
 		return "", err
 	}
@@ -207,6 +230,9 @@ func (p *PasswordCipher) Seal(plaintext, additionalData []byte) (string, error) 
 
 // Open authenticates and decrypts a password-based SEC2 envelope.
 func (p *PasswordCipher) Open(envelope string, additionalData []byte) ([]byte, error) {
+	if err := p.validate(); err != nil {
+		return nil, err
+	}
 	if len(additionalData) > p.cfg.maxEnvelope {
 		return nil, ErrLimitExceeded
 	}
@@ -307,7 +333,7 @@ func parseEnvelope(envelope string, limit int) (header, nonce, ciphertext []byte
 	case modePassword:
 		headerLen += 4 + 4 + 1 + saltSize
 	default:
-		return nil, nil, nil, ErrUnsupportedVersion
+		return nil, nil, nil, ErrInvalidEnvelope
 	}
 	const nonceLen = 12
 	if len(packed) < headerLen+nonceLen+16 {

@@ -66,9 +66,9 @@ unmarshaling. Plaintext JSON is rejected unless
 `WithPlaintextJSONMigration()` is explicitly supplied. A migrated value is
 encrypted on its next marshal.
 
-## Migrating from v1
+## Migrating from v0.0.4
 
-V2 does not expose v1 global configuration or AES-CFB stream APIs. Re-encrypt
+V2 does not expose v0.0.4 global configuration or AES-CFB stream APIs. Re-encrypt
 stored values one at a time:
 
 ```go
@@ -78,7 +78,7 @@ newValue, err := p.Seal(plaintext, nil)
 ```
 
 `OpenLegacy` accepts an already-derived 32-byte key. Legacy options support
-custom v1 salts, PBKDF2 iteration counts, armor prefixes, and base64 encodings.
+custom v0.0.4 salts, PBKDF2 iteration counts, armor prefixes, and base64 encodings.
 Only legacy decryption is available; v2 never creates `SEC.` ciphertext.
 
 Never commit production keys, passphrases, or salts. Treat changes to envelope

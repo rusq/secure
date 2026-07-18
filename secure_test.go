@@ -110,7 +110,7 @@ func TestEnvelopeTamperingAndValidation(t *testing.T) {
 		{"empty payload", prefix, ErrInvalidEnvelope},
 		{"short payload", prefix + base64.RawURLEncoding.EncodeToString([]byte{2, modeKey}), ErrInvalidEnvelope},
 		{"old version", prefix + base64.RawURLEncoding.EncodeToString([]byte{1, modeKey}), ErrUnsupportedVersion},
-		{"unknown mode", prefix + base64.RawURLEncoding.EncodeToString([]byte{2, 99}), ErrUnsupportedVersion},
+		{"unknown mode", prefix + base64.RawURLEncoding.EncodeToString([]byte{2, 99}), ErrInvalidEnvelope},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

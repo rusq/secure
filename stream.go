@@ -21,6 +21,9 @@ const (
 // NewEncryptWriter returns an authenticated streaming writer. Close must be
 // called to write the authenticated final record.
 func (c *Cipher) NewEncryptWriter(w io.Writer) (io.WriteCloser, error) {
+	if err := c.validate(); err != nil {
+		return nil, err
+	}
 	if w == nil {
 		return nil, errors.New("secure: nil writer")
 	}
@@ -39,6 +42,9 @@ func (c *Cipher) NewEncryptWriter(w io.Writer) (io.WriteCloser, error) {
 
 // NewDecryptReader reads and authenticates a key-based stream.
 func (c *Cipher) NewDecryptReader(r io.Reader) (io.Reader, error) {
+	if err := c.validate(); err != nil {
+		return nil, err
+	}
 	header, salt, _, err := readStreamHeader(r, modeKey)
 	if err != nil {
 		return nil, err
@@ -51,6 +57,9 @@ func (c *Cipher) NewDecryptReader(r io.Reader) (io.Reader, error) {
 }
 
 func (p *PasswordCipher) NewEncryptWriter(w io.Writer) (io.WriteCloser, error) {
+	if err := p.validate(); err != nil {
+		return nil, err
+	}
 	if w == nil {
 		return nil, errors.New("secure: nil writer")
 	}
@@ -70,6 +79,9 @@ func (p *PasswordCipher) NewEncryptWriter(w io.Writer) (io.WriteCloser, error) {
 }
 
 func (p *PasswordCipher) NewDecryptReader(r io.Reader) (io.Reader, error) {
+	if err := p.validate(); err != nil {
+		return nil, err
+	}
 	header, salt, params, err := readStreamHeader(r, modePassword)
 	if err != nil {
 		return nil, err
