@@ -1,12 +1,18 @@
 # Secure (almost)
 
-Secure provides a convenient String and Int types that are encrypted with the
-AES-256 with GCM upon Marshalling/Unmarshalling to JSON.
+Secure provides convenient String and Int types that are encrypted with
+AES-256-GCM when marshaled to JSON and decrypted when unmarshaled.
 
 It uses the standard Go runtime encryption.
 
-Do not use the provided "salt" for anything other than testing - it may change
-from version to version to encourage to use your own salt.
+The bundled salt is fixed for ciphertext compatibility and is not secret. Use a
+stable, application-specific salt configured with SetSalt before deriving keys.
+Changing the salt makes existing passphrase-encrypted values unreadable.
 
-It is strongly encouraged to set your own salt with SetSalt() before using the
-encryption functions of the package.
+Global keys, salts, signatures, encodings, and DeriveIter must be configured
+before encryption starts and must not be changed concurrently with use.
+
+The legacy stream helpers use AES-CFB and provide confidentiality only: they do
+not detect modified, reordered, or truncated ciphertext. Do not use them for new
+applications. The authenticated stream API is available in
+`github.com/rusq/secure/v2`.

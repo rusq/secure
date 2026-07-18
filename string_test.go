@@ -110,3 +110,44 @@ func TestString_MarshalJSON(t *testing.T) {
 		})
 	}
 }
+
+func TestStringJSONEscapesCustomSignature(t *testing.T) {
+	z := newTestKeySentinel()
+	defer z.Reset()
+
+	configMu.RLock()
+	oldSignature := signature
+	configMu.RUnlock()
+	SetSignature("SEC\"\\.")
+	t.Cleanup(func() { SetSignature(oldSignature) })
+
+	data, err := json.Marshal(String("plain text"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !json.Valid(data) {
+		t.Fatalf("MarshalJSON produced invalid JSON: %q", data)
+	}
+	var got String
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got != "plain text" {
+		t.Fatalf("round trip = %q, want %q", got, "plain text")
+	}
+}
+
+func TestStringMethod(t *testing.T) {
+	if got := String("plain text").String(); got != "plain text" {
+		t.Fatalf("String() = %q", got)
+	}
+}
+
+func TestSetEncodingRejectsNil(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("SetEncoding(nil) did not panic")
+		}
+	}()
+	SetEncoding(nil)
+}

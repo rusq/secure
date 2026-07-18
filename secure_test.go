@@ -2,10 +2,12 @@ package secure
 
 import (
 	"bytes"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log"
 	"reflect"
+	"sync"
 	"testing"
 )
 
@@ -18,8 +20,7 @@ var testPassphrase = []byte{0, 0, 0, 0, 0, 0}
 func TestEncryptPlainText(t *testing.T) {
 	out, err := EncryptWithPassphrase("plain text", testPassphrase)
 	if err != nil {
-		fmt.Println("brokeh:", err)
-		return
+		t.Fatal(err)
 	}
 	t.Log(out)
 	// Output:
@@ -65,6 +66,99 @@ func Test_deriveKey(t *testing.T) {
 				t.Errorf("deriveKey() got = %#v, want %#v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestDeriveKeyRejectsInvalidConfiguration(t *testing.T) {
+	for _, size := range []int{-8, 0, 7} {
+		if _, err := DeriveKey([]byte("passphrase"), size); !errors.Is(err, ErrInvalidKeySz) {
+			t.Fatalf("DeriveKey key size %d error = %v, want %v", size, err, ErrInvalidKeySz)
+		}
+	}
+
+	oldIterations := DeriveIter
+	DeriveIter = 0
+	t.Cleanup(func() { DeriveIter = oldIterations })
+	if _, err := DeriveKey([]byte("passphrase"), keySz); err == nil {
+		t.Fatal("DeriveKey accepted a nonpositive iteration count")
+	}
+}
+
+func TestConfigurationCopiesInputs(t *testing.T) {
+	oldKey := globalKey()
+	configMu.RLock()
+	oldSalt := append([]byte(nil), salt...)
+	configMu.RUnlock()
+	t.Cleanup(func() {
+		_ = SetGlobalKey(oldKey)
+		SetSalt(oldSalt)
+	})
+
+	key := bytes.Repeat([]byte{0x42}, keySz)
+	if err := SetGlobalKey(key); err != nil {
+		t.Fatal(err)
+	}
+	key[0] ^= 0xff
+	if got := globalKey(); got[0] != 0x42 {
+		t.Fatalf("global key changed through caller slice: %x", got[0])
+	}
+
+	configuredSalt := []byte("application salt")
+	SetSalt(configuredSalt)
+	configuredSalt[0] = 'X'
+	configMu.RLock()
+	gotSalt := append([]byte(nil), salt...)
+	configMu.RUnlock()
+	if string(gotSalt) != "application salt" {
+		t.Fatalf("global salt changed through caller slice: %q", gotSalt)
+	}
+}
+
+func TestSupportedConfigurationAccessIsConcurrentSafe(t *testing.T) {
+	oldKey := globalKey()
+	configMu.RLock()
+	oldSalt := append([]byte(nil), salt...)
+	oldSignature, oldEncoding := signature, b64encoding
+	configMu.RUnlock()
+	t.Cleanup(func() {
+		_ = SetGlobalKey(oldKey)
+		SetSalt(oldSalt)
+		SetSignature(oldSignature)
+		SetEncoding(oldEncoding)
+	})
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, 1000)
+	for worker := 0; worker < 4; worker++ {
+		worker := worker
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for iteration := 0; iteration < 50; iteration++ {
+				key := bytes.Repeat([]byte{byte(worker + iteration + 1)}, keySz)
+				if err := SetGlobalKey(key); err != nil {
+					errCh <- err
+				}
+				SetSalt([]byte{byte(worker), byte(iteration), 1})
+				SetSignature(fmt.Sprintf("SEC%d.", worker))
+				if iteration%2 == 0 {
+					SetEncoding(base64.URLEncoding)
+				} else {
+					SetEncoding(base64.StdEncoding)
+				}
+				if _, err := Encrypt("concurrent"); err != nil {
+					errCh <- err
+				}
+				if _, err := DeriveKey([]byte("passphrase"), keySz); err != nil {
+					errCh <- err
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Errorf("concurrent configuration operation: %v", err)
 	}
 }
 
@@ -381,6 +475,9 @@ func TestIsDecryptError(t *testing.T) {
 	}{
 		{"cipher", args{&CipherError{nil}}, true},
 		{"corrupt", args{&CorruptError{nil}}, true},
+		{"wrapped cipher", args{fmt.Errorf("context: %w", &CipherError{errors.New("authentication failed")})}, true},
+		{"wrapped corrupt", args{fmt.Errorf("context: %w", &CorruptError{[]byte("bad")})}, true},
+		{"nil", args{nil}, false},
 		{"other", args{errors.New("your shotgun is nearby")}, false},
 	}
 	for _, tt := range tests {
@@ -390,4 +487,75 @@ func TestIsDecryptError(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCipherErrorNilSafety(t *testing.T) {
+	var nilCipherError *CipherError
+	if got := nilCipherError.Error(); got != "cipher error" {
+		t.Fatalf("nil CipherError = %q", got)
+	}
+	if got := (&CipherError{}).Error(); got != "cipher error" {
+		t.Fatalf("empty CipherError = %q", got)
+	}
+	inner := errors.New("authentication failed")
+	cipherErr := &CipherError{inner}
+	if !errors.Is(cipherErr, inner) {
+		t.Fatal("CipherError did not unwrap its cause")
+	}
+	if !errors.Is(cipherErr, &CipherError{errors.New("authentication failed")}) {
+		t.Fatal("equivalent CipherError did not match")
+	}
+	if errors.Is(cipherErr, &CipherError{}) {
+		t.Fatal("CipherError matched an empty target")
+	}
+	corrupt := &CorruptError{[]byte("packed")}
+	if !errors.Is(corrupt, &CorruptError{[]byte("packed")}) {
+		t.Fatal("equivalent CorruptError did not match")
+	}
+	if errors.Is(corrupt, &CorruptError{[]byte("different")}) {
+		t.Fatal("different CorruptError matched")
+	}
+}
+
+func TestEncryptRejectsInvalidInputs(t *testing.T) {
+	if _, err := encrypt("plaintext", nil, nil); !errors.Is(err, ErrNoEncryptionKey) {
+		t.Fatalf("empty key error = %v", err)
+	}
+	if _, err := encrypt("plaintext", make([]byte, 16), nil); !errors.Is(err, ErrInvalidKeySz) {
+		t.Fatalf("short key error = %v", err)
+	}
+	if _, err := encrypt("", make([]byte, keySz), nil); err == nil {
+		t.Fatal("empty plaintext was accepted")
+	}
+	if _, err := encrypt("plaintext", make([]byte, keySz), make([]byte, maxDataSz+1)); err == nil {
+		t.Fatal("oversized additional data was accepted")
+	}
+	if _, err := initGCM(nil); err == nil {
+		t.Fatal("initGCM accepted an empty key")
+	}
+}
+
+func TestSetSignatureRejectsEmpty(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("SetSignature accepted an empty signature")
+		}
+	}()
+	SetSignature("")
+}
+
+func FuzzDecrypt(f *testing.F) {
+	key, err := DeriveKey(testPassphrase, keySz)
+	if err != nil {
+		f.Fatal(err)
+	}
+	if err := SetGlobalKey(key); err != nil {
+		f.Fatal(err)
+	}
+	f.Add(encryptedPlainText)
+	f.Add("SEC.")
+	f.Add("plain text")
+	f.Fuzz(func(t *testing.T, input string) {
+		_, _ = Decrypt(input)
+	})
 }

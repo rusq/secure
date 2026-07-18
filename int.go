@@ -1,7 +1,7 @@
 package secure
 
 import (
-	"bytes"
+	"encoding/json"
 	"fmt"
 	"strconv"
 )
@@ -15,11 +15,14 @@ func (ei Int) String() string {
 
 func (ei Int) MarshalJSON() ([]byte, error) {
 	data, err := Encrypt(ei.String())
-	return []byte(`"` + data + `"`), err
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(data)
 }
 
 func (ei *Int) UnmarshalJSON(b []byte) error {
-	b = bytes.Trim(b, `"`)
+	b = decodeJSONString(b)
 	if len(b) == 0 {
 		*ei = 0
 		return nil

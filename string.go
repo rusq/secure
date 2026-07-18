@@ -2,6 +2,7 @@ package secure
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 )
 
@@ -14,14 +15,17 @@ func (es String) String() string {
 
 func (es String) MarshalJSON() ([]byte, error) {
 	if len(es) == 0 {
-		return []byte(`""`), nil
+		return json.Marshal("")
 	}
 	data, err := Encrypt(string(es))
-	return []byte(`"` + data + `"`), err
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(data)
 }
 
 func (es *String) UnmarshalJSON(b []byte) error {
-	b = bytes.Trim(b, `"`)
+	b = decodeJSONString(b)
 	if len(b) == 0 {
 		*es = ""
 		return nil
@@ -36,4 +40,14 @@ func (es *String) UnmarshalJSON(b []byte) error {
 	}
 	*es = String(pt)
 	return nil
+}
+
+func decodeJSONString(b []byte) []byte {
+	var value string
+	if err := json.Unmarshal(b, &value); err == nil {
+		return []byte(value)
+	}
+	// Preserve v0.1's permissive handling for callers that invoke
+	// UnmarshalJSON directly with unquoted input.
+	return bytes.Trim(b, `"`)
 }

@@ -19,16 +19,22 @@ type CipherError struct {
 }
 
 func (e *CipherError) Error() string {
+	if e == nil || e.Err == nil {
+		return "cipher error"
+	}
 	return e.Err.Error()
 }
 
 func (e *CipherError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
 	return e.Err
 }
 
 func (e *CipherError) Is(target error) bool {
 	t, ok := target.(*CipherError)
-	if !ok {
+	if !ok || e == nil || e.Err == nil || t == nil || t.Err == nil {
 		return false
 	}
 	return e.Err.Error() == t.Err.Error()
@@ -53,9 +59,7 @@ func (e *CorruptError) Is(target error) bool {
 // IsDecipherError returns true if there was a decryption error or corrupt data
 // error and false if it's a different kind of error.
 func IsDecipherError(err error) bool {
-	switch err.(type) {
-	case *CipherError, *CorruptError:
-		return true
-	}
-	return false
+	var cipherErr *CipherError
+	var corruptErr *CorruptError
+	return errors.As(err, &cipherErr) || errors.As(err, &corruptErr)
 }
