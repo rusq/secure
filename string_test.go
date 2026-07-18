@@ -1,112 +1,75 @@
 package secure
 
 import (
-	"bytes"
 	"encoding/json"
-	"reflect"
+	"errors"
 	"testing"
 )
 
-const sampleJson = `
-{
-	"id": 24,
-	"username": "hide_ur_pain",
-	"secret": "` + encryptedPlainText + `"
-}
-`
-
-type testType struct {
-	ID       int    `json:"id"`
-	Username string `json:"username"`
-	Secret   String `json:"secret"`
-}
-
-var testStruct = testType{
-	ID:       24,
-	Username: "hide_ur_pain",
-	Secret:   "plain text",
-}
-
-func TestString_UnmarshalJSONtoStruct(t *testing.T) {
-	z := newTestKeySentinel()
-	defer z.Reset()
-
-	var got testType
-	err := json.Unmarshal([]byte(sampleJson), &got)
+func TestEncryptedStringJSON(t *testing.T) {
+	c, _ := NewCipher(testKey)
+	secret, err := NewEncryptedString(c, "quote: \" and slash: \\")
 	if err != nil {
-		t.Errorf("Unmarshal() unexpected error: %s", err)
+		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(testStruct, got) {
-		t.Errorf("test structure doesn't match the unmashralled: want=%v, got=%v", testStruct, got)
+	data, err := json.Marshal(secret)
+	if err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestString_UnmarshalJSON(t *testing.T) {
-	z := newTestKeySentinel()
-	defer z.Reset()
-
-	type args struct {
-		b []byte
+	decoded, _ := NewEncryptedString(c, "")
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
 	}
-	tests := []struct {
-		name    string
-		args    args
-		wantES  String
-		wantErr bool
-	}{
-		{"unencrypted", args{[]byte("unencrypted")}, "unencrypted", false},
-		{"unencrypted quoted", args{[]byte("\"unencrypted\"")}, "unencrypted", false},
-		{"encrypted", args{[]byte(encryptedPlainText)}, "plain text", false},
-		{"encrypted quoted", args{[]byte(`"` + encryptedPlainText + `"`)}, "plain text", false},
-		{"invalid", args{[]byte(signature + "i must break you")}, "", true},
-		{"empty", args{[]byte{}}, "", false},
-		{"empty quoted", args{[]byte(`""`)}, "", false},
+	if decoded.Value() != secret.Value() {
+		t.Fatalf("got %q", decoded.Value())
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var es String
-			if err := es.UnmarshalJSON(tt.args.b); (err != nil) != tt.wantErr {
-				t.Errorf("UnmarshalJSON() error = %v, wantErr %v", err, tt.wantErr)
-			}
-			if !reflect.DeepEqual(string(tt.wantES), string(es)) {
-				t.Errorf("UnmarshalJSON did not work as expected: want=%q, got=%q", string(tt.wantES), string(es))
-			}
-		})
+	decoded.Set("changed")
+	if decoded.String() != "changed" {
+		t.Fatalf("Set failed: %q", decoded.String())
 	}
 }
 
-func TestString_MarshalJSON(t *testing.T) {
-	z := newTestKeySentinel()
-	defer z.Reset()
-
-	tests := []struct {
-		name    string
-		es      String
-		want    string
-		wantErr bool
-	}{
-		{"plain text", String("plain text"), "plain text", false},
-		{"empty", String(""), ``, false},
+func TestEncryptedStringRejectsPlaintext(t *testing.T) {
+	c, _ := NewCipher(testKey)
+	strict, _ := NewEncryptedString(c, "")
+	if err := json.Unmarshal([]byte(`"plain"`), &strict); !errors.Is(err, ErrInvalidEnvelope) {
+		t.Fatalf("plaintext error = %v", err)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			encrypted, err := tt.es.MarshalJSON()
-			if (err != nil) != tt.wantErr {
-				t.Errorf("MarshalJSON() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
+	if err := json.Unmarshal([]byte(`null`), &strict); !errors.Is(err, ErrInvalidEnvelope) {
+		t.Fatalf("null error = %v", err)
+	}
+	if err := json.Unmarshal([]byte(`123`), &strict); err == nil {
+		t.Fatal("numeric JSON accepted")
+	}
 
-			encrypted = bytes.Trim(encrypted, `"`)
-			if len(encrypted) == 0 && len(tt.want) == 0 {
-				return // all good, empty string is an empty string.
-			}
-			got, err := Decrypt(string(encrypted))
-			if err != nil {
-				t.Errorf("unexpected decrypt error: %s", err)
-			}
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("MarshalJSON() got = %v, want %v", got, tt.want)
-			}
-		})
+	migration, _ := NewEncryptedString(c, "", WithPlaintextJSONMigration())
+	if err := json.Unmarshal([]byte(`"plain"`), &migration); err != nil {
+		t.Fatal(err)
+	}
+	if migration.Value() != "plain" {
+		t.Fatalf("got %q", migration.Value())
+	}
+	data, err := json.Marshal(migration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) == `"plain"` {
+		t.Fatal("migration value was not encrypted")
+	}
+}
+
+func TestEncryptedStringUnconfigured(t *testing.T) {
+	var value EncryptedString
+	if _, err := json.Marshal(value); !errors.Is(err, ErrUnconfigured) {
+		t.Fatalf("marshal error = %v", err)
+	}
+	if err := json.Unmarshal([]byte(`"x"`), &value); !errors.Is(err, ErrUnconfigured) {
+		t.Fatalf("unmarshal error = %v", err)
+	}
+	if _, err := NewEncryptedString(nil, ""); !errors.Is(err, ErrUnconfigured) {
+		t.Fatalf("constructor error = %v", err)
+	}
+	if _, err := NewEncryptedString(&Cipher{}, "", nil); err == nil {
+		t.Fatal("accepted nil JSON option")
 	}
 }

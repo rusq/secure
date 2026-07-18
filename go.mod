@@ -1,4 +1,4 @@
-module github.com/rusq/secure
+module github.com/rusq/secure/v2
 
 go 1.25.0
 

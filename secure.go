@@ -1,313 +1,341 @@
-// Package secure provides simple convenience encryption and decryption
-// functions.
-//
-// It should not be used to encrypt critical information in open source
-// projects, where the salt might be known to attaker.
-//
-// It uses the standard Go runtime AES-256 block cipher with GCM.
-//
-// Encryption key is a 256-bit value (32 bytes).
-//
-// The default "Salt" is a fixed 256 byte array of pseudo-random values, taken
-// from /dev/urandom.
-//
-// Then additional data, nonce and ciphertext are packed into the following
-// sequence of bytes:
-//
-//   |_|__...__|_________|__...__|
-//    ^    ^        ^        ^
-//    |    |        |        +- ciphertext, n bytes.
-//    |    |        +---------- nonce, (nonceSz bytes)
-//    |    +------------------- additinal data, m bytes, (maxDataSz bytes),
-//    +------------------------ additional data length value (adlSz bytes).
-//
-// After this, packed byte sequence is armoured with base64 and the signature
-// prefix added to it to distinct it from the plain text.
+// Package secure provides versioned, authenticated encryption for byte
+// slices, strings, JSON values, and streams.
 package secure
 
 import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
-	"crypto/sha512"
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
-	"strings"
 
-	"golang.org/x/crypto/pbkdf2"
+	"golang.org/x/crypto/argon2"
 )
 
 const (
-	nonceSz   = 12                // bytes, nonce sz
-	keyBits   = 256               // encryption gKey size.
-	keySz     = keyBits >> 3      // bytes, gKey size
-	adlSz     = 1                 // bytes, size of additional data length field
-	maxDataSz = 1<<(adlSz<<3) - 1 // bytes, max additional data size (this is the maximum that can fit into (adlSz) bytes)
+	prefix             = "SEC2."
+	envelopeVersion    = 2
+	modeKey            = 1
+	modePassword       = 2
+	keySize            = 32
+	saltSize           = 16
+	defaultMaxEnvelope = 16 << 20
+
+	defaultArgonTime    = uint32(3)
+	defaultArgonMemory  = uint32(64 * 1024)
+	defaultArgonThreads = uint8(4)
+	maxArgonTime        = uint32(10)
+	maxArgonMemory      = uint32(256 * 1024)
+	maxArgonThreads     = uint8(16)
 )
 
-var (
-	// used to identify encrypted strings
-	signature = "SEC."
-	// DeriveIter is the number of iterations used to derive the key.
-	DeriveIter = 4096
+// Codec is implemented by encryption contexts usable by the JSON helpers.
+type Codec interface {
+	Seal(plaintext, additionalData []byte) (string, error)
+	Open(envelope string, additionalData []byte) ([]byte, error)
+}
 
-	// salt will be used to XOR the gKey which we generate by padding the
-	// passphrase.  It is advised that caller sets their own salt (BYO) with
-	// SetSalt.
-	salt = []byte{
-		0x51, 0xfc, 0xd8, 0xf9, 0xab, 0x85, 0x93, 0x5d, 0xd2, 0x85, 0x2e, 0x78,
-		0x3f, 0x80, 0x3a, 0xce, 0x19, 0xf1, 0x20, 0x75, 0x2a, 0xdd, 0x7b, 0x5c,
-		0xe6, 0x17, 0xdb, 0x4b, 0x72, 0xc7, 0x83, 0x06, 0x10, 0x91, 0x70, 0x33,
-		0x42, 0x0d, 0x75, 0xf9, 0xb8, 0x14, 0x39, 0x5a, 0xcf, 0xae, 0x6a, 0xec,
-		0x7d, 0x3a, 0x2a, 0x87, 0xf8, 0x86, 0xa8, 0xea, 0x25, 0x7e, 0xb5, 0xf9,
-		0x61, 0xe8, 0xa5, 0x5e, 0x20, 0x2f, 0xa2, 0x99, 0x85, 0xa3, 0xcc, 0xcd,
-		0x5c, 0x39, 0x1b, 0x6d, 0x1b, 0x17, 0xa9, 0xb4, 0xeb, 0x95, 0xdd, 0xfb,
-		0xbe, 0x3c, 0x2c, 0x3b, 0xe9, 0x7d, 0x5d, 0x3e, 0x78, 0x37, 0x23, 0xda,
-		0xa5, 0x35, 0xd8, 0x36, 0xa7, 0x42, 0xd6, 0xdb, 0x38, 0xba, 0x17, 0x12,
-		0x8c, 0x76, 0x83, 0x38, 0xd8, 0x23, 0x02, 0x38, 0x26, 0xe3, 0xe7, 0xe2,
-		0x5e, 0xcb, 0xc9, 0x90, 0xd2, 0x46, 0x27, 0x84, 0x77, 0x41, 0x6b, 0xb5,
-		0x7a, 0x4a, 0x4f, 0x45, 0xaa, 0xab, 0x50, 0xa7, 0x58, 0x35, 0xe8, 0xa9,
-		0x27, 0xc1, 0xb8, 0xa9, 0x32, 0x03, 0x02, 0x3d, 0x19, 0x77, 0x5a, 0xd2,
-		0x0c, 0x52, 0x08, 0x01, 0xfa, 0xb9, 0xb2, 0x86, 0xfd, 0x24, 0x73, 0xc3,
-		0x39, 0xde, 0x4f, 0x86, 0x93, 0x19, 0xd7, 0xd5, 0x65, 0x00, 0xf1, 0x2d,
-		0x0c, 0x6f, 0x3c, 0x21, 0xd0, 0xc6, 0x27, 0x99, 0x05, 0x19, 0x7c, 0x0d,
-		0x57, 0x33, 0x4f, 0x8c, 0x2f, 0x72, 0x97, 0x5a, 0xfa, 0x08, 0x51, 0x51,
-		0xbc, 0x56, 0xd4, 0xc4, 0xed, 0x01, 0xeb, 0xe2, 0x6a, 0x82, 0xc6, 0x4c,
-		0x09, 0x76, 0xe3, 0xfa, 0x87, 0xe2, 0xd7, 0x68, 0x13, 0xa5, 0xcf, 0x32,
-		0xa2, 0x16, 0x6c, 0x53, 0x50, 0x2d, 0xd2, 0x58, 0xe4, 0x67, 0x18, 0x7b,
-		0x8a, 0x84, 0xe3, 0xa4, 0x49, 0x14, 0x64, 0xd5, 0x06, 0x68, 0xc7, 0x45,
-		0x68, 0xeb, 0x4a, 0xb0,
+type config struct {
+	maxEnvelope int
+	rand        io.Reader
+}
+
+// Option configures a Cipher.
+type Option func(*config) error
+
+// WithMaxEnvelopeSize limits the decoded envelope size accepted or produced.
+func WithMaxEnvelopeSize(n int) Option {
+	return func(c *config) error {
+		if n < 64 {
+			return fmt.Errorf("%w: envelope size must be at least 64 bytes", ErrLimitExceeded)
+		}
+		c.maxEnvelope = n
+		return nil
 	}
-)
+}
 
-var b64encoding = base64.URLEncoding
+func newConfig(opts []Option) (config, error) {
+	c := config{maxEnvelope: defaultMaxEnvelope, rand: rand.Reader}
+	for _, opt := range opts {
+		if opt == nil {
+			return config{}, fmt.Errorf("%w: nil option", ErrInvalidEnvelope)
+		}
+		if err := opt(&c); err != nil {
+			return config{}, err
+		}
+	}
+	return c, nil
+}
 
-var gKey []byte
+// Cipher is an immutable AES-256-GCM encryption context.
+type Cipher struct {
+	key [keySize]byte
+	cfg config
+}
 
-// SetGlobalKey sets the global package Key, it doesn't check for key size.
-func SetGlobalKey(k []byte) error {
-	gKey = k
+// NewCipher creates a key-based encryption context. key must contain 32 bytes.
+func NewCipher(key []byte, opts ...Option) (*Cipher, error) {
+	if len(key) != keySize {
+		return nil, fmt.Errorf("secure: key must be %d bytes", keySize)
+	}
+	cfg, err := newConfig(opts)
+	if err != nil {
+		return nil, err
+	}
+	c := &Cipher{cfg: cfg}
+	copy(c.key[:], key)
+	return c, nil
+}
+
+// Argon2Parameters controls password key derivation. Memory is measured in KiB.
+type Argon2Parameters struct {
+	Time    uint32
+	Memory  uint32
+	Threads uint8
+}
+
+func defaultArgon2Parameters() Argon2Parameters {
+	return Argon2Parameters{defaultArgonTime, defaultArgonMemory, defaultArgonThreads}
+}
+
+func validateArgon2(p Argon2Parameters) error {
+	if p.Time < defaultArgonTime || p.Memory < defaultArgonMemory || p.Threads < defaultArgonThreads {
+		return fmt.Errorf("%w: Argon2id parameters are below the security minimum", ErrLimitExceeded)
+	}
+	if p.Time > maxArgonTime || p.Memory > maxArgonMemory || p.Threads > maxArgonThreads {
+		return fmt.Errorf("%w: Argon2id parameters exceed resource limits", ErrLimitExceeded)
+	}
 	return nil
 }
 
-// SetPassphrase allows to set the global passphrase, from which the key is
-// derived.
-func SetPassphrase(b []byte) error {
-	k, err := DeriveKey(b, keySz)
+type passwordConfig struct {
+	config
+	argon Argon2Parameters
+}
+
+// PasswordOption configures a PasswordCipher.
+type PasswordOption func(*passwordConfig) error
+
+// WithPasswordMaxEnvelopeSize sets the decoded envelope limit.
+func WithPasswordMaxEnvelopeSize(n int) PasswordOption {
+	return func(c *passwordConfig) error {
+		return WithMaxEnvelopeSize(n)(&c.config)
+	}
+}
+
+// WithArgon2Parameters raises the Argon2id work factors used for new data.
+func WithArgon2Parameters(p Argon2Parameters) PasswordOption {
+	return func(c *passwordConfig) error {
+		if err := validateArgon2(p); err != nil {
+			return err
+		}
+		c.argon = p
+		return nil
+	}
+}
+
+// PasswordCipher encrypts with a password and a fresh Argon2id salt per item.
+type PasswordCipher struct {
+	passphrase []byte
+	cfg        passwordConfig
+}
+
+// NewPasswordCipher creates a password-based encryption context.
+func NewPasswordCipher(passphrase []byte, opts ...PasswordOption) (*PasswordCipher, error) {
+	if len(passphrase) == 0 {
+		return nil, errors.New("secure: empty passphrase")
+	}
+	cfg := passwordConfig{config: config{maxEnvelope: defaultMaxEnvelope, rand: rand.Reader}, argon: defaultArgon2Parameters()}
+	for _, opt := range opts {
+		if opt == nil {
+			return nil, fmt.Errorf("%w: nil option", ErrInvalidEnvelope)
+		}
+		if err := opt(&cfg); err != nil {
+			return nil, err
+		}
+	}
+	return &PasswordCipher{passphrase: append([]byte(nil), passphrase...), cfg: cfg}, nil
+}
+
+// Seal encrypts plaintext and authenticates additionalData without storing it.
+func (c *Cipher) Seal(plaintext, additionalData []byte) (string, error) {
+	return sealWithKey(c.key[:], modeKey, nil, plaintext, additionalData, c.cfg)
+}
+
+// Open authenticates and decrypts a key-based SEC2 envelope.
+func (c *Cipher) Open(envelope string, additionalData []byte) ([]byte, error) {
+	if len(additionalData) > c.cfg.maxEnvelope {
+		return nil, ErrLimitExceeded
+	}
+	header, nonce, ciphertext, err := parseEnvelope(envelope, c.cfg.maxEnvelope)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return SetGlobalKey(k)
-}
-
-// SetEncoding allows to set the package-wide encoding.  Encoding is used
-// for armoring the ciphertext.
-func SetEncoding(enc *base64.Encoding) {
-	b64encoding = enc
-}
-
-// DeriveKey interpolates the passphrase value to the gKey size and xors it
-// with salt.
-func DeriveKey(pass []byte, keySz int) ([]byte, error) {
-	if len(pass) == 0 {
-		return nil, errors.New("empty passphrase")
+	if header[1] != modeKey {
+		return nil, fmt.Errorf("%w: envelope requires a password", ErrInvalidEnvelope)
 	}
-	if keySz%8 != 0 {
-		return nil, ErrInvalidKeySz
+	return openAEAD(c.key[:], header, nonce, ciphertext, additionalData)
+}
+
+// EncryptString encrypts a UTF-8 string without additional data.
+func (c *Cipher) EncryptString(plaintext string) (string, error) {
+	return c.Seal([]byte(plaintext), nil)
+}
+
+// DecryptString decrypts a UTF-8 string without additional data.
+func (c *Cipher) DecryptString(envelope string) (string, error) {
+	b, err := c.Open(envelope, nil)
+	return string(b), err
+}
+
+// Seal encrypts plaintext using a fresh salt and Argon2id-derived key.
+func (p *PasswordCipher) Seal(plaintext, additionalData []byte) (string, error) {
+	if err := checkSealSize(2+4+4+1+saltSize, len(plaintext), len(additionalData), p.cfg.maxEnvelope); err != nil {
+		return "", err
 	}
-
-	return pbkdf2.Key(pass, salt[:], DeriveIter, keySz, sha512.New), nil
+	salt := make([]byte, saltSize)
+	if _, err := io.ReadFull(p.cfg.rand, salt); err != nil {
+		return "", fmt.Errorf("secure: generate salt: %w", err)
+	}
+	header := passwordHeader(p.cfg.argon, salt)
+	key := argon2.IDKey(p.passphrase, salt, p.cfg.argon.Time, p.cfg.argon.Memory, p.cfg.argon.Threads, keySize)
+	return sealWithKey(key, modePassword, header[2:], plaintext, additionalData, p.cfg.config)
 }
 
-// Encrypt encrypts the plain text password to use in the configuration file
-// with the gKey generated by KeyFn.
-func Encrypt(plaintext string) (string, error) {
-	return encrypt(plaintext, gKey, nil)
+// Open authenticates and decrypts a password-based SEC2 envelope.
+func (p *PasswordCipher) Open(envelope string, additionalData []byte) ([]byte, error) {
+	if len(additionalData) > p.cfg.maxEnvelope {
+		return nil, ErrLimitExceeded
+	}
+	header, nonce, ciphertext, err := parseEnvelope(envelope, p.cfg.maxEnvelope)
+	if err != nil {
+		return nil, err
+	}
+	if header[1] != modePassword || len(header) != 2+4+4+1+saltSize {
+		return nil, fmt.Errorf("%w: envelope does not contain password parameters", ErrInvalidEnvelope)
+	}
+	params := Argon2Parameters{binary.BigEndian.Uint32(header[2:6]), binary.BigEndian.Uint32(header[6:10]), header[10]}
+	if err := validateArgon2(params); err != nil {
+		return nil, err
+	}
+	salt := header[11 : 11+saltSize]
+	key := argon2.IDKey(p.passphrase, salt, params.Time, params.Memory, params.Threads, keySize)
+	return openAEAD(key, header, nonce, ciphertext, additionalData)
 }
 
-// Decrypt attempts to decrypt the string and return the password.
-// In case s is not an encrypted string, ErrNotEncrypted returned along with
-// original string.
-func Decrypt(s string) (string, error) {
-	return decrypt(s, gKey)
+func (p *PasswordCipher) EncryptString(plaintext string) (string, error) {
+	return p.Seal([]byte(plaintext), nil)
 }
 
-// EncryptWithPassphrase encrypts plaintext with the provided passphrase.
-func EncryptWithPassphrase(plaintext string, passphrase []byte) (string, error) {
-	key, err := DeriveKey(passphrase, keySz)
+func (p *PasswordCipher) DecryptString(envelope string) (string, error) {
+	b, err := p.Open(envelope, nil)
+	return string(b), err
+}
+
+func passwordHeader(p Argon2Parameters, salt []byte) []byte {
+	h := make([]byte, 2+4+4+1+saltSize)
+	h[0], h[1] = envelopeVersion, modePassword
+	binary.BigEndian.PutUint32(h[2:6], p.Time)
+	binary.BigEndian.PutUint32(h[6:10], p.Memory)
+	h[10] = p.Threads
+	copy(h[11:], salt)
+	return h
+}
+
+func sealWithKey(key []byte, mode byte, extraHeader, plaintext, additionalData []byte, cfg config) (string, error) {
+	header := append([]byte{envelopeVersion, mode}, extraHeader...)
+	if err := checkSealSize(len(header), len(plaintext), len(additionalData), cfg.maxEnvelope); err != nil {
+		return "", err
+	}
+	block, err := aes.NewCipher(key)
 	if err != nil {
 		return "", err
 	}
-	return encrypt(plaintext, key, nil)
-}
-
-// DecryptWithPassphrase attempts to descrypt string with the provided
-// passphrase.
-func DecryptWithPassphrase(s string, passphrase []byte) (string, error) {
-	key, err := DeriveKey(passphrase, keySz)
+	aead, err := cipher.NewGCM(block)
 	if err != nil {
 		return "", err
 	}
-	return decrypt(s, key)
+	nonce := make([]byte, aead.NonceSize())
+	if _, err := io.ReadFull(cfg.rand, nonce); err != nil {
+		return "", fmt.Errorf("secure: generate nonce: %w", err)
+	}
+	ciphertext := aead.Seal(nil, nonce, plaintext, envelopeAAD(header, additionalData))
+	packedLen := len(header) + len(nonce) + len(ciphertext)
+	if packedLen > cfg.maxEnvelope {
+		return "", ErrLimitExceeded
+	}
+	packed := make([]byte, 0, packedLen)
+	packed = append(packed, header...)
+	packed = append(packed, nonce...)
+	packed = append(packed, ciphertext...)
+	return prefix + base64.RawURLEncoding.EncodeToString(packed), nil
 }
 
-// Encrypt encrypts the plain text password to use in the configuration file.
-func encrypt(plaintext string, key []byte, additionalData []byte) (string, error) {
-	if len(key) == 0 {
-		return "", ErrNoEncryptionKey
+func checkSealSize(headerLen, plaintextLen, additionalDataLen, limit int) error {
+	const gcmOverhead = 16
+	const nonceLen = 12
+	if additionalDataLen > limit || headerLen > limit-nonceLen-gcmOverhead || plaintextLen > limit-headerLen-nonceLen-gcmOverhead {
+		return ErrLimitExceeded
 	}
-	if len(key) != keySz {
-		return "", ErrInvalidKeySz
-	}
-	if len(plaintext) == 0 {
-		return "", errors.New("nothing to encrypt")
-	}
-	if len(additionalData) > maxDataSz {
-		return "", fmt.Errorf("size of additional data can't exceed %d B", maxDataSz)
-	}
-
-	gcm, err := initGCM(key)
-	if err != nil {
-		return "", err
-	}
-
-	nonce := make([]byte, nonceSz)
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		return "", err
-	}
-	ciphertext := gcm.Seal(nil, nonce, []byte(plaintext), additionalData)
-
-	// return signature + base64.StdEncoding.EncodeToString(data), nil
-	packed, err := pack(ciphermsg{nonce, ciphertext, additionalData})
-	if err != nil {
-		return "", err
-	}
-
-	return armor(packed), nil
+	return nil
 }
 
-// initGCM initialises the Galois/Counter Mode
-func initGCM(key []byte) (cipher.AEAD, error) {
+func parseEnvelope(envelope string, limit int) (header, nonce, ciphertext []byte, err error) {
+	if len(envelope) < len(prefix) || envelope[:len(prefix)] != prefix {
+		return nil, nil, nil, ErrInvalidEnvelope
+	}
+	encoded := envelope[len(prefix):]
+	if base64.RawURLEncoding.DecodedLen(len(encoded)) > limit {
+		return nil, nil, nil, ErrLimitExceeded
+	}
+	packed, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("%w: invalid base64", ErrInvalidEnvelope)
+	}
+	if len(packed) < 2 || packed[0] != envelopeVersion {
+		if len(packed) > 0 && packed[0] != envelopeVersion {
+			return nil, nil, nil, ErrUnsupportedVersion
+		}
+		return nil, nil, nil, ErrInvalidEnvelope
+	}
+	headerLen := 2
+	switch packed[1] {
+	case modeKey:
+	case modePassword:
+		headerLen += 4 + 4 + 1 + saltSize
+	default:
+		return nil, nil, nil, ErrUnsupportedVersion
+	}
+	const nonceLen = 12
+	if len(packed) < headerLen+nonceLen+16 {
+		return nil, nil, nil, ErrInvalidEnvelope
+	}
+	return packed[:headerLen], packed[headerLen : headerLen+nonceLen], packed[headerLen+nonceLen:], nil
+}
+
+func openAEAD(key, header, nonce, ciphertext, additionalData []byte) ([]byte, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
 	}
-	return cipher.NewGCM(block)
-}
-
-func pack(cm ciphermsg) ([]byte, error) {
-	if len(cm.nonce) == 0 {
-		return nil, errors.New("pack: empty nonce")
-	}
-	if len(cm.ciphertext) == 0 {
-		return nil, errors.New("pack: no ciphertext")
-	}
-	dataLen := len(cm.additionalData)
-	if dataLen > maxDataSz {
-		return nil, ErrDataOverflow
-	}
-
-	packed := make([]byte, nonceSz+len(cm.ciphertext)+1+dataLen)
-	packed[0] = byte(dataLen)
-	if dataLen > 0 {
-		copy(packed[adlSz:], cm.additionalData)
-	}
-	copy(packed[adlSz+dataLen:], cm.nonce)
-	copy(packed[adlSz+dataLen+nonceSz:], cm.ciphertext)
-
-	return packed, nil
-}
-
-func armor(packed []byte) string {
-	return signature + b64encoding.EncodeToString(packed)
-}
-
-func unarmor(s string) ([]byte, error) {
-	sigSz := len(signature)
-	s = strings.TrimSpace(s)
-	if len(s) < sigSz || s[0:sigSz] != signature {
-		return nil, ErrNotEncrypted
-	}
-	packed, err := b64encoding.DecodeString(s[sigSz:])
+	aead, err := cipher.NewGCM(block)
 	if err != nil {
 		return nil, err
 	}
-	return packed, nil
-}
-
-type ciphermsg struct {
-	nonce          []byte
-	ciphertext     []byte
-	additionalData []byte
-}
-
-func unpack(packed []byte) (*ciphermsg, error) {
-	if len(packed) == 0 {
-		return nil, errors.New("unpack: empty input")
-	}
-	var (
-		dataLen   = int(packed[0])
-		payloadSz = len(packed) - adlSz - nonceSz // payload is data + ct size
-	)
-	if dataLen > payloadSz || payloadSz-dataLen == 0 {
-		return nil, &CorruptError{packed}
-	}
-	cm := &ciphermsg{
-		nonce:      packed[adlSz+dataLen : adlSz+dataLen+nonceSz],
-		ciphertext: packed[adlSz+dataLen+nonceSz:],
-	}
-	if dataLen > 0 {
-		cm.additionalData = packed[adlSz : adlSz+dataLen]
-	}
-	return cm, nil
-}
-
-func decrypt(s string, key []byte) (string, error) {
-	packed, err := unarmor(s)
+	plaintext, err := aead.Open(nil, nonce, ciphertext, envelopeAAD(header, additionalData))
 	if err != nil {
-		if err == ErrNotEncrypted {
-			return s, err
-		}
-		return "", err // other error
+		return nil, ErrAuthentication
 	}
-	if len(key) == 0 {
-		return "", ErrNoEncryptionKey
-	}
-	cm, err := unpack(packed)
-	if err != nil {
-		return "", err
-	}
-	aesgcm, err := initGCM(key)
-	if err != nil {
-		return "", err
-	}
-
-	plaintext, err := aesgcm.Open(nil, cm.nonce, cm.ciphertext, cm.additionalData)
-	if err != nil {
-		return "", &CipherError{err}
-	}
-	return string(plaintext), nil
+	return plaintext, nil
 }
 
-// SetSignature allows to set package-wide signature, that is used to identify
-// encrypted strings.
-func SetSignature(s string) {
-	if len(s) == 0 {
-		panic("signature can't be empty")
-	}
-	signature = s
-}
-
-// SetSalt allows to set package-wide salt that will be used with every call.
-// Salt should be a random set of bytes, but should remain the same across the
-// calls and application restarts, so it should be generated in some
-// deterministic way.  It would not be possible to decrypt cipher text with
-// different salt.  It is recommended to use at least 8 bytes of salt.
-//
-// IT IS STRONGLY ADVISED TO USE YOUR OWN SALT.
-//
-func SetSalt(sa []byte) {
-	salt = sa
+func envelopeAAD(header, additionalData []byte) []byte {
+	aad := make([]byte, 4+len(header)+len(additionalData))
+	binary.BigEndian.PutUint32(aad[:4], uint32(len(header)))
+	copy(aad[4:], header)
+	copy(aad[4+len(header):], additionalData)
+	return aad
 }

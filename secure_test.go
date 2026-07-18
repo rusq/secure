@@ -2,392 +2,259 @@ package secure
 
 import (
 	"bytes"
+	"crypto/sha512"
+	"encoding/base64"
 	"errors"
-	"fmt"
-	"log"
-	"reflect"
+	"strings"
 	"testing"
+
+	"golang.org/x/crypto/pbkdf2"
 )
 
-const (
-	encryptedPlainText = "SEC.AIIPjL0a2HgLgOySAw9fAT6ovih9MfzkMv_pyWmmkA3eBxYbDlLQ"
-)
+var testKey = bytes.Repeat([]byte{0x42}, keySize)
 
-var testPassphrase = []byte{0, 0, 0, 0, 0, 0}
-
-func TestEncryptPlainText(t *testing.T) {
-	out, err := EncryptWithPassphrase("plain text", testPassphrase)
-	if err != nil {
-		fmt.Println("brokeh:", err)
-		return
-	}
-	t.Log(out)
-	// Output:
-}
-
-func testNonce(b byte) []byte {
-	var n = make([]byte, nonceSz)
-	for i := range n {
-		n[i] = b
-	}
-	return n
-}
-
-func Test_deriveKey(t *testing.T) {
-	type args struct {
-		pass []byte
-	}
-	tests := []struct {
-		name    string
-		args    args
-		want    []byte
-		wantErr bool
-	}{
-		{"zero", args{testPassphrase},
-			[]byte{0x3c, 0x23, 0x9f, 0xe6, 0x3c, 0x15, 0xe2, 0x58, 0xc3, 0x57, 0xed, 0xf6, 0xe1, 0xed, 0x88, 0xb0, 0xc1, 0xa1, 0x49, 0xdd, 0xef, 0xb8, 0x56, 0x6f, 0x3e, 0xb2, 0x76, 0x2a, 0x8, 0xb8, 0x9, 0x16},
-			false,
-		},
-		{"offset 1",
-			args{[]byte{1, 0, 0, 0, 0, 0}},
-			[]byte{0xad, 0x7, 0xde, 0xbf, 0x54, 0xef, 0x32, 0xee, 0xee, 0xda, 0xb3, 0x3f, 0x1, 0x5f, 0x34, 0xd, 0x20, 0x63, 0x31, 0x67, 0x73, 0xd8, 0xb8, 0x77, 0xba, 0x94, 0xa5, 0x79, 0xaf, 0x26, 0xc2, 0xd0},
-			false,
-		},
-		{"empty pass", args{nil}, nil, true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := DeriveKey(tt.args.pass, keySz)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("deriveKey() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("deriveKey() got = %#v, want %#v", got, tt.want)
-			}
-		})
-	}
-}
-
-// to reset it's value.
-type keySentinel struct {
-	oldKey []byte
-}
-
-// newKeySentinel sets the global gKey to the specified value.  Call Reset() on
-// the sentinel to reset the initial variable value.
-func newKeySentinel(k []byte) keySentinel {
-	m := keySentinel{gKey}
-	if err := SetGlobalKey(k); err != nil {
-		panic(err)
-	}
-	return m
-}
-
-// Reset resets the old value of KeyFromHwAddr
-func (m keySentinel) Reset() {
-	if err := SetGlobalKey(m.oldKey); err != nil {
-		log.Printf("this is ok: %s", err)
-	}
-}
-
-// newTestKeySentinel sets the gKey to test password
-func newTestKeySentinel() keySentinel {
-	k, err := DeriveKey(testPassphrase, keySz)
-	if err != nil {
-		panic(err)
-	}
-	return newKeySentinel(k)
-}
-
-func Test_Encryption(t *testing.T) {
-	const wantPT = "plain text"
-
-	m := newTestKeySentinel()
-	defer m.Reset()
-
-	key, err := DeriveKey(testPassphrase, keySz)
+func TestCipherRoundTrip(t *testing.T) {
+	c, err := NewCipher(testKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ct, err := encrypt(wantPT, key, []byte("123"))
+	plaintext := []byte("secret value")
+	aad := []byte("configuration/database")
+	envelope, err := c.Seal(plaintext, aad)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Log(ct)
-	pt, err := decrypt(ct, key)
+	if !strings.HasPrefix(envelope, prefix) {
+		t.Fatalf("unexpected envelope: %q", envelope)
+	}
+	got, err := c.Open(envelope, aad)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(wantPT, pt) {
-		t.Errorf("before/after pt doesn't match: want=%q, got=%q", wantPT, pt)
+	if !bytes.Equal(got, plaintext) {
+		t.Fatalf("got %q, want %q", got, plaintext)
 	}
-}
+	if _, err := c.Open(envelope, []byte("wrong")); !errors.Is(err, ErrAuthentication) {
+		t.Fatalf("wrong AAD error = %v", err)
+	}
 
-func Test_EncryptDecryptWithPassphrase(t *testing.T) {
-	const wantPT = "plain text"
-
-	ct, err := EncryptWithPassphrase(wantPT, []byte("1234567890"))
+	text, err := c.EncryptString("hello")
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Log(ct)
-	pt, err := DecryptWithPassphrase(ct+"     ", []byte("1234567890"))
+	if got, err := c.DecryptString(text); err != nil || got != "hello" {
+		t.Fatalf("DecryptString() = %q, %v", got, err)
+	}
+}
+
+func TestCipherCopiesKey(t *testing.T) {
+	key := append([]byte(nil), testKey...)
+	c, err := NewCipher(key)
 	if err != nil {
-		t.Error(err)
+		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(wantPT, pt) {
-		t.Errorf("before/after pt doesn't match: want=%q, got=%q", wantPT, pt)
+	key[0] ^= 0xff
+	envelope, err := c.EncryptString("copied")
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	// trying to decrypt with different passphrase should return error
-	pt, err = DecryptWithPassphrase(ct, []byte("11:22:33:44:55:66"))
-	if err == nil {
-		t.Errorf("should have failed to decrypt, but did not, pt=%v", pt)
-	}
-}
-
-func TestDecrypt(t *testing.T) {
-	z := newTestKeySentinel()
-	defer z.Reset()
-
-	type args struct {
-		s string
-	}
-
-	tests := []struct {
-		name    string
-		args    args
-		want    string
-		wantErr bool
-	}{
-		{"encrypted password", args{encryptedPlainText}, "plain text", false},
-		{"trim", args{"   " + encryptedPlainText + "\n"}, "plain text", false},
-		{"invalid base64", args{encryptedPlainText[:len(encryptedPlainText)-1]}, "", true},
-		{"non-encrypted password", args{"plain text"}, "plain text", true},
-		{"signature, but non-encrypted (error)", args{signature + "plain text"}, "", true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := Decrypt(tt.args.s)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("Decrypt() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if got != tt.want {
-				t.Errorf("Decrypt() got = %v, want %v", got, tt.want)
-			}
-		})
+	if got, err := c.DecryptString(envelope); err != nil || got != "copied" {
+		t.Fatalf("got %q, %v", got, err)
 	}
 }
 
-var (
-	validPacked = bytesjoin([]byte{3, 1, 2, 3}, testNonce(0xcc), []byte{4, 5, 6})
-	validCm     = ciphermsg{
-		additionalData: []byte{1, 2, 3},
-		nonce:          testNonce(0xcc),
-		ciphertext:     []byte{4, 5, 6},
+func TestCipherRejectsInvalidConfiguration(t *testing.T) {
+	for _, key := range [][]byte{nil, make([]byte, 16), make([]byte, 33)} {
+		if _, err := NewCipher(key); err == nil {
+			t.Fatalf("accepted %d-byte key", len(key))
+		}
 	}
-)
-
-func Test_pack(t *testing.T) {
-	type args struct {
-		cm ciphermsg
+	if _, err := NewCipher(testKey, WithMaxEnvelopeSize(1)); !errors.Is(err, ErrLimitExceeded) {
+		t.Fatalf("limit error = %v", err)
 	}
-	tests := []struct {
-		name    string
-		args    args
-		want    []byte
-		wantErr bool
-	}{
-		{"packing ok",
-			args{validCm},
-			validPacked,
-			false,
-		},
-		{"data too big",
-			args{ciphermsg{
-				additionalData: make([]byte, maxDataSz+1),
-				nonce:          testNonce(0xcc),
-				ciphertext:     []byte{4, 5, 6}}},
-			nil,
-			true,
-		},
-		{"empty additional data",
-			args{ciphermsg{
-				additionalData: nil,
-				nonce:          testNonce(0xcc),
-				ciphertext:     []byte{255, 254, 253},
-			}},
-			bytesjoin([]byte{0}, testNonce(0xcc), []byte{255, 254, 253}),
-			false,
-		},
-		{"empty nonce",
-			args{ciphermsg{
-				additionalData: []byte{1, 2, 3},
-				nonce:          nil,
-				ciphertext:     []byte{255, 254, 253},
-			}},
-			nil,
-			true,
-		},
-		{"empty ct",
-			args{ciphermsg{
-				additionalData: []byte{1, 2, 3},
-				nonce:          testNonce(0xcc),
-				ciphertext:     nil,
-			}},
-			nil,
-			true,
-		},
+	if _, err := NewCipher(testKey, nil); !errors.Is(err, ErrInvalidEnvelope) {
+		t.Fatalf("nil option error = %v", err)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := pack(tt.args.cm)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("pack() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if !bytes.Equal(got, tt.want) {
-				t.Errorf("pack() = %v, want %v", got, tt.want)
-			}
-		})
+	if _, err := NewPasswordCipher(nil); err == nil {
+		t.Fatal("accepted empty password")
+	}
+	weak := Argon2Parameters{Time: 2, Memory: defaultArgonMemory, Threads: defaultArgonThreads}
+	if _, err := NewPasswordCipher([]byte("pass"), WithArgon2Parameters(weak)); !errors.Is(err, ErrLimitExceeded) {
+		t.Fatalf("weak Argon2 error = %v", err)
 	}
 }
 
-func Test_unpack(t *testing.T) {
-	type args struct {
-		packed []byte
+func TestEnvelopeTamperingAndValidation(t *testing.T) {
+	c, _ := NewCipher(testKey)
+	envelope, err := c.EncryptString("tamper me")
+	if err != nil {
+		t.Fatal(err)
 	}
-	tests := []struct {
-		name    string
-		args    args
-		want    *ciphermsg
-		wantErr bool
-	}{
-		{"ok",
-			args{validPacked},
-			&validCm,
-			false,
-		},
-		{"empty input", args{}, nil, true},
-		{"invalid data length",
-			args{bytesjoin([]byte{6, 1, 2, 3}, testNonce(0xcc), []byte{4, 5, 6})},
-			nil,
-			true,
-		},
-		{"empty data",
-			args{bytesjoin([]byte{0}, testNonce(0xcc), []byte{4, 5, 6})},
-			&ciphermsg{
-				additionalData: nil,
-				nonce:          testNonce(0xcc),
-				ciphertext:     []byte{4, 5, 6},
-			},
-			false,
-		},
-		{"empty CT",
-			args{bytesjoin([]byte{1, 0xdd}, testNonce(0xcc))},
-			nil,
-			true,
-		},
-		{"empty everything except data",
-			args{[]byte{1, 0xdd}},
-			nil,
-			true,
-		},
-		{"nothing to do",
-			args{[]byte{0}},
-			nil,
-			true,
-		},
+	packed, _ := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(envelope, prefix))
+	for _, offset := range []int{1, 2, len(packed) - 1} {
+		mutated := append([]byte(nil), packed...)
+		mutated[offset] ^= 1
+		candidate := prefix + base64.RawURLEncoding.EncodeToString(mutated)
+		if _, err := c.DecryptString(candidate); err == nil {
+			t.Fatalf("tampering at %d was accepted", offset)
+		}
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := unpack(tt.args.packed)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("unpack() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("unpack() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
 
-// bytejoin aims  to declutter the bytes.Join call in tests.
-func bytesjoin(bb ...[]byte) []byte {
-	return bytes.Join(bb, []byte{})
-}
-
-func Test_armor(t *testing.T) {
-	type args struct {
-		packed []byte
-	}
-	tests := []struct {
+	cases := []struct {
 		name string
-		args args
-		want string
+		in   string
+		want error
 	}{
-		{"ok", args{validPacked}, signature + "AwECA8zMzMzMzMzMzMzMzAQFBg=="},
-		{"another one", args{}, signature},
+		{"plaintext", "plain", ErrInvalidEnvelope},
+		{"bad base64", prefix + "!", ErrInvalidEnvelope},
+		{"empty payload", prefix, ErrInvalidEnvelope},
+		{"short payload", prefix + base64.RawURLEncoding.EncodeToString([]byte{2, modeKey}), ErrInvalidEnvelope},
+		{"old version", prefix + base64.RawURLEncoding.EncodeToString([]byte{1, modeKey}), ErrUnsupportedVersion},
+		{"unknown mode", prefix + base64.RawURLEncoding.EncodeToString([]byte{2, 99}), ErrUnsupportedVersion},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := armor(tt.args.packed); got != tt.want {
-				t.Errorf("armor() = %v, want %v", got, tt.want)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := c.DecryptString(tc.in)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("error = %v, want %v", err, tc.want)
 			}
 		})
 	}
 }
 
-func Test_unarmor(t *testing.T) {
-	type args struct {
-		s string
+func TestEnvelopeLimit(t *testing.T) {
+	c, err := NewCipher(testKey, WithMaxEnvelopeSize(80))
+	if err != nil {
+		t.Fatal(err)
 	}
-	tests := []struct {
-		name    string
-		args    args
-		want    []byte
-		wantErr bool
-	}{
-		{"plain text", args{"some text"}, nil, true},
-		{"illegal base64", args{signature + "hey you"}, nil, true},
-		{"armored data", args{signature + "AwECA8zMzMzMzMzMzMzMzAQFBg=="}, validPacked, false},
-		{"empty text", args{""}, nil, true},
-		{"trim space", args{"    " + signature + "AwECA8zMzMzMzMzMzMzMzAQFBg==   "}, validPacked, false},
+	if _, err := c.Seal(bytes.Repeat([]byte("x"), 80), nil); !errors.Is(err, ErrLimitExceeded) {
+		t.Fatalf("Seal error = %v", err)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := unarmor(tt.args.s)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("unarmor() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("unarmor() = %v, want %v", got, tt.want)
-			}
-		})
+	oversized := prefix + strings.Repeat("A", 200)
+	if _, err := c.Open(oversized, nil); !errors.Is(err, ErrLimitExceeded) {
+		t.Fatalf("Open error = %v", err)
+	}
+	largeAAD := bytes.Repeat([]byte("a"), 81)
+	if _, err := c.Seal(nil, largeAAD); !errors.Is(err, ErrLimitExceeded) {
+		t.Fatalf("Seal AAD error = %v", err)
+	}
+	if _, err := c.Open(prefix, largeAAD); !errors.Is(err, ErrLimitExceeded) {
+		t.Fatalf("Open AAD error = %v", err)
 	}
 }
 
-func TestIsDecryptError(t *testing.T) {
-	type args struct {
-		err error
+func TestPasswordCipher(t *testing.T) {
+	p, err := NewPasswordCipher([]byte("correct horse battery staple"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	tests := []struct {
-		name string
-		args args
-		want bool
-	}{
-		{"cipher", args{&CipherError{nil}}, true},
-		{"corrupt", args{&CorruptError{nil}}, true},
-		{"other", args{errors.New("your shotgun is nearby")}, false},
+	envelope, err := p.EncryptString("password secret")
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := IsDecipherError(tt.args.err); got != tt.want {
-				t.Errorf("IsDecryptError() = %v, want %v", got, tt.want)
-			}
-		})
+	if got, err := p.DecryptString(envelope); err != nil || got != "password secret" {
+		t.Fatalf("got %q, %v", got, err)
 	}
+	wrong, _ := NewPasswordCipher([]byte("wrong password"))
+	if _, err := wrong.DecryptString(envelope); !errors.Is(err, ErrAuthentication) {
+		t.Fatalf("wrong password error = %v", err)
+	}
+	if _, err := p.DecryptString(envelope); err != nil {
+		t.Fatal(err)
+	}
+
+	packed, _ := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(envelope, prefix))
+	packed[2] = 0xff // force an excessive time cost without running Argon2
+	bad := prefix + base64.RawURLEncoding.EncodeToString(packed)
+	if _, err := p.DecryptString(bad); !errors.Is(err, ErrLimitExceeded) {
+		t.Fatalf("hostile KDF error = %v", err)
+	}
+}
+
+func TestOpenLegacy(t *testing.T) {
+	const envelope = "SEC.AIIPjL0a2HgLgOySAw9fAT6ovih9MfzkMv_pyWmmkA3eBxYbDlLQ"
+	passphrase := []byte{0, 0, 0, 0, 0, 0}
+	got, err := OpenLegacyWithPassphrase(envelope, passphrase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "plain text" {
+		t.Fatalf("got %q", got)
+	}
+	if _, err := OpenLegacyWithPassphrase(envelope, []byte("wrong")); !errors.Is(err, ErrAuthentication) {
+		t.Fatalf("wrong password error = %v", err)
+	}
+	if _, err := OpenLegacyWithPassphrase("plain", passphrase); !errors.Is(err, ErrInvalidEnvelope) {
+		t.Fatalf("plain error = %v", err)
+	}
+}
+
+func TestLegacyMigrationOptions(t *testing.T) {
+	const envelope = "SEC.AIIPjL0a2HgLgOySAw9fAT6ovih9MfzkMv_pyWmmkA3eBxYbDlLQ"
+	passphrase := []byte{0, 0, 0, 0, 0, 0}
+	cfg := defaultLegacyConfig()
+	key := pbkdf2.Key(passphrase, cfg.salt, cfg.iterations, keySize, sha512.New)
+	if got, err := OpenLegacy(envelope, key); err != nil || string(got) != "plain text" {
+		t.Fatalf("OpenLegacy() = %q, %v", got, err)
+	}
+	packed, _ := base64.URLEncoding.DecodeString(strings.TrimPrefix(envelope, "SEC."))
+	custom := "CUSTOM:" + base64.StdEncoding.EncodeToString(packed)
+	got, err := OpenLegacyWithPassphrase(custom, passphrase,
+		WithLegacySalt(cfg.salt),
+		WithLegacyIterations(4096),
+		WithLegacyPrefix("CUSTOM:"),
+		WithLegacyEncoding(base64.StdEncoding),
+		WithLegacyMaxEnvelopeSize(1024),
+	)
+	if err != nil || string(got) != "plain text" {
+		t.Fatalf("custom legacy = %q, %v", got, err)
+	}
+
+	invalid := []LegacyOption{
+		WithLegacySalt(nil),
+		WithLegacyIterations(0),
+		WithLegacyPrefix(""),
+		WithLegacyEncoding(nil),
+		WithLegacyMaxEnvelopeSize(1),
+		nil,
+	}
+	for i, option := range invalid {
+		if _, err := OpenLegacyWithPassphrase(envelope, passphrase, option); err == nil {
+			t.Fatalf("invalid option %d accepted", i)
+		}
+	}
+	if _, err := OpenLegacy(envelope, make([]byte, 16)); err == nil {
+		t.Fatal("legacy accepted short key")
+	}
+	if _, err := OpenLegacyWithPassphrase(envelope, nil); err == nil {
+		t.Fatal("legacy accepted empty passphrase")
+	}
+}
+
+func TestPasswordOptionsAndModeSeparation(t *testing.T) {
+	p, err := NewPasswordCipher([]byte("password"), WithPasswordMaxEnvelopeSize(1024), WithArgon2Parameters(defaultArgon2Parameters()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewPasswordCipher([]byte("password"), nil); !errors.Is(err, ErrInvalidEnvelope) {
+		t.Fatalf("nil password option = %v", err)
+	}
+	c, _ := NewCipher(testKey)
+	keyEnvelope, _ := c.EncryptString("key")
+	if _, err := p.DecryptString(keyEnvelope); !errors.Is(err, ErrInvalidEnvelope) {
+		t.Fatalf("password opened key envelope: %v", err)
+	}
+	passwordEnvelope, _ := p.EncryptString("password")
+	if _, err := c.DecryptString(passwordEnvelope); !errors.Is(err, ErrInvalidEnvelope) {
+		t.Fatalf("key opened password envelope: %v", err)
+	}
+}
+
+func FuzzOpen(f *testing.F) {
+	c, _ := NewCipher(testKey, WithMaxEnvelopeSize(1024))
+	f.Add("plain")
+	f.Add(prefix)
+	f.Fuzz(func(t *testing.T, input string) {
+		_, _ = c.Open(input, nil)
+	})
 }

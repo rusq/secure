@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This single Go module (`github.com/rusq/secure`) implements the `secure` package. Production code lives at the root: `secure.go` contains core AES-GCM operations, `stream.go` handles streams, and `string.go` and `int.go` provide JSON-friendly encrypted types. Shared errors are in `errors.go`; tests are colocated in `*_test.go` files. `README.md` documents the API, and `gimmesalt.sh` generates salt data.
+This single Go module (`github.com/rusq/secure/v2`) implements the `secure` package. Production code lives at the root: `secure.go` contains versioned AES-GCM envelopes, `stream.go` handles authenticated streams, `legacy.go` supports read-only v1 migration, and `string.go` and `int.go` provide encrypted JSON values. Tests are colocated in `*_test.go` files, and `README.md` documents the API.
 
 ## Build, Test, and Development Commands
 
@@ -12,6 +12,7 @@ This single Go module (`github.com/rusq/secure`) implements the `secure` package
 - `go vet ./...` performs standard Go static analysis.
 - `go build ./...` confirms all packages compile.
 - `gofmt -w *.go` formats Go source and tests before review.
+- `make check` runs formatting, vet, race-enabled tests, and the build.
 
 Use the Go version declared in `go.mod` (currently Go 1.25). Run `go mod tidy` only when dependencies change, and include resulting `go.mod` and `go.sum` updates together.
 
@@ -29,4 +30,4 @@ Recent commits use short, imperative, lowercase subjects such as `add stream enc
 
 ## Security & Configuration Tips
 
-Never commit real passphrases, keys, salts, or production ciphertext. The bundled salt is for testing only; applications should configure their own salt and key material. Treat changes to derivation parameters, encoding, nonce handling, or serialized layout as security-sensitive and compatibility-affecting.
+Never commit real passphrases, keys, salts, or production ciphertext. Load 32-byte keys from managed secret storage; password envelopes generate their own salts. Treat changes to derivation parameters, nonce handling, authenticated headers, or serialized layouts as security-sensitive and compatibility-affecting.
