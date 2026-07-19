@@ -43,6 +43,11 @@ func (es *String) UnmarshalJSON(b []byte) error {
 }
 
 func decodeJSONString(b []byte) []byte {
+	if bytes.Equal(bytes.TrimSpace(b), []byte("null")) {
+		// Preserve v0.1's handling: String stores the literal text "null"
+		// while Int passes it to strconv.Atoi and returns an error.
+		return bytes.Trim(b, `"`)
+	}
 	var value string
 	if err := json.Unmarshal(b, &value); err == nil {
 		return []byte(value)

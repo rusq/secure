@@ -143,6 +143,16 @@ func TestStringMethod(t *testing.T) {
 	}
 }
 
+func TestStringUnmarshalJSONNullCompatibility(t *testing.T) {
+	var got String
+	if err := json.Unmarshal([]byte("null"), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got != "null" {
+		t.Fatalf("UnmarshalJSON(null) = %q, want %q", got, "null")
+	}
+}
+
 func TestSetEncodingRejectsNil(t *testing.T) {
 	defer func() {
 		if recover() == nil {

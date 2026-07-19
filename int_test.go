@@ -1,6 +1,7 @@
 package secure
 
 import (
+	"encoding/json"
 	"errors"
 	"math"
 	"testing"
@@ -51,6 +52,20 @@ func TestIntUnmarshalCompatibilityAndErrors(t *testing.T) {
 	}
 	if err := invalid.UnmarshalJSON([]byte(`"SEC.invalid"`)); err == nil || errors.Is(err, ErrNotEncrypted) {
 		t.Fatalf("invalid encrypted integer error = %v", err)
+	}
+	if err := invalid.UnmarshalJSON([]byte("null")); err == nil {
+		t.Fatal("JSON null was silently accepted as an integer")
+	}
+}
+
+func TestEncryptedFieldsRejectNullWithoutSilentDataLoss(t *testing.T) {
+	var got struct {
+		I Int    `json:"i"`
+		S String `json:"s"`
+	}
+	err := json.Unmarshal([]byte(`{"i":null,"s":null}`), &got)
+	if err == nil {
+		t.Fatalf("json.Unmarshal() = %+v, nil; want integer conversion error", got)
 	}
 }
 
